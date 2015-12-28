@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+#/ command: rundeck-executions:output: "Get the output for an execution."
+#/ usage: rerun rundeck-executions:output  --id <>  --url <${RUNDECK_URL:-}> [ --username <${RUNDECK_USER:-}>] [ --password <${RUNDECK_PASSWORD:-}>] [ --apikey <${RUNDECK_APIKEY:-}>] [ --lastlines <>] [ --format <>] [ --offset <0>] 
+#/ rerun-variables: RERUN, RERUN_VERSION, RERUN_MODULES, RERUN_MODULE_DIR
+#/ option-variables: ID URL USERNAME PASSWORD APIKEY LASTLINES FORMAT OFFSET
+
+. $RERUN_MODULE_DIR/lib/functions.sh output || { 
+  echo >&2 "Failed loading function library." ; exit 1 ; 
+}
+
+set -o errexit -o nounset -o pipefail
+
+rerun_options_parse "$@"
+
+: ${FORMAT:=plain}
+[[ -n "${LASTLINES:-}" ]] && params="${params:-}&lastlines=$LASTLINES"
+
+CURL_OUT=$(mktemp -t curl.out.XXXXXXXXXX)
+trap 'rm $CURL_OUT' EXIT; # cleanup on exit
+
+APIURL=${URL}/api/12/execution/$ID/output
+
+rundeck_authenticate -u "$URL" -U "${USERNAME:-}" -p "${PASSWORD:-}" -k "${APIKEY:-}"
+
+qparams=
+[[ -n "$OFFSET" ]] && qparams="offset=$OFFSET"
+
+if ! http_code=$(rundeck_curl -w "%{http_code}" \
+	-H Accept:text/xml \
+    -X GET "${APIURL}?${qparams:-}" \
+    -o $CURL_OUT)
+then
+	rerun_die 3 "curl request failed (exit code: $?)"
+fi
+
+#xmlstarlet fo $CURL_OUT; # debug
+
+case ${http_code:-} in
+	200) : ;; # successful 
+	40*) rerun_die 3 "$(xmlstarlet sel -t -m //error -v message $CURL_OUT)" ;;
+	* ) rerun_die 3 "API error (HTTP response: $http_code, GET ${APIURL})." ;;
+esac  
+
+
+if [[ "${FORMAT}" == "annotated" ]]
+then
+	xmlstarlet sel -t -m //entry -v @time -o " [" -v @node -o "] " -v @log -n $CURL_OUT
+else
+	xmlstarlet sel -t -m //entry -v @log -n $CURL_OUT
+fi
+
+offset=$(xmlstarlet sel -t -m /output -v offset $CURL_OUT)
+lastModified=$(xmlstarlet sel -t -m /output -v lastModified $CURL_OUT)
+completed=$(xmlstarlet sel -t -m /output -v completed $CURL_OUT)
+
+# Make recursive call to get future output
+if [[ "$completed" != "true" ]]
+then
+	sleep 5
+	rerun_log debug " - rerun rundeck-executions:output --id ${ID} --offset $offset (option.OFFSET=${OFFSET})"
+	[[ "$FORMAT" == annotated ]] && fFlag="--format annotated"
+	rerun rundeck-executions:output --id ${ID} --offset $offset ${fFlag:-}
+fi	
+
+
+# Done. Exit with last command exit status.
+exit $?

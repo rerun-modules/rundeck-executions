@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+#/ command: rundeck-executions:state: "Get detail about the node and step state of an execution by ID."
+#/ usage: rerun rundeck-executions:state  --url <$RUNDECK_URL> [ --username <$RUNDECK_USER>] [ --password <$RUNDECK_PASSWORD>] [ --apikey <$RUNDECK_APIKEY>]  --id <> 
+#/ rerun-variables: RERUN, RERUN_VERSION, RERUN_MODULES, RERUN_MODULE_DIR
+#/ option-variables: URL USERNAME PASSWORD APIKEY ID
+
+. $RERUN_MODULE_DIR/lib/functions.sh state || { 
+  echo >&2 "Failed loading function library." ; exit 1 ; 
+}
+
+set -o errexit -o nounset -o pipefail
+
+rerun_options_parse "$@"
+
+# Command implementation
+# ----------------------
+CURL_OUT=$(mktemp -t curl.out.XXXXXXXXXX)
+trap 'rm $CURL_OUT' EXIT; # cleanup on exit
+
+! DATE=$(which gdate) && DATE=date
+tstamp=$($DATE +%s%3N)
+
+
+rundeck_authenticate -u "$URL" -U "${USERNAME:-}" -p "${PASSWORD:-}" -k "${APIKEY:-}"
+
+APIURL=${URL}/api/12/execution/$ID/state
+
+if ! http_code=$(rundeck_curl -w "%{http_code}" -H 'Accept: application/xml' \
+    -X GET "${APIURL}" \
+    -o $CURL_OUT)
+then
+	rerun_die 3 "curl request failed (exit code: $?)"
+fi
+
+case ${http_code:-} in
+	200) : ;; # successful
+	404) rerun_die 3 "Failed getting status" ;;
+	* ) rerun_die 3 "API error $http_code: GET ${APIURL})." ;;
+esac  
+
+xmlstarlet fo $CURL_OUT
+
+status=$(xmlstarlet sel -t -m "//execution" -v @status $CURL_OUT)
+description=$(xmlstarlet sel -t -m "//execution" -v job/description $CURL_OUT)
+! argstring=$(xmlstarlet sel -t -m "//execution" -v argstring $CURL_OUT)
+project=$(xmlstarlet sel -t -m "//execution" -v @project $CURL_OUT)
+dateStarted=$(xmlstarlet sel -t -m "//execution/date-started" -v @unixtime $CURL_OUT)
+! dateEnded=$(xmlstarlet sel -t -m "//execution/date-ended" -v @unixtime $CURL_OUT) && :
+! dateEndedCal=$(xmlstarlet sel -t -m "//execution/date-ended" -v . $CURL_OUT) && :
+execId=$(xmlstarlet sel -t -m "//execution" -v @id $CURL_OUT)
+user=$(xmlstarlet sel -t -m "//execution" -v user $CURL_OUT)
+
+case "$status" in
+	succeeded|failed|aborted) 
+		duration=$(( ($dateEnded - $dateStarted) / 1000 ))
+		printf "[%s] %s %s - %s in %ss, by %s, project: %s, ended: %s \n" \
+	 		"$execId" "$description" "${argstring:-}" "$status" "$duration" "$user" "$project" "$dateEndedCal"
+		;;
+	running) 
+		# Figure out elapsed time
+		elapsed_millis=$(( $tstamp - $dateStarted ))
+		elapsed_secs=$(( $elapsed_millis / 1000 ))
+
+		printf "[%s] %s - %s - %ss elapsed, by: %s, project: %s\n" \
+			"$execId" "$description" "$status" "$elapsed_secs" "$user" "$project"
+		;;		
+esac
+
+[[ "${DETAIL:-}" == "true" ]] && {
+
+	if ! successfulNodes=($(xmlstarlet sel -t -m "//successfulNodes/node" -v @name -o " " $CURL_OUT))
+	then
+		:; # there were no successful nodes
+	else
+		printf "successful-nodes (%s): %s\n" "${#successfulNodes[*]}" "${successfulNodes[*]}"
+	fi
+
+	if ! failedNodes=($(xmlstarlet sel -t -m "//failedNodes/node" -v @name -o " " $CURL_OUT))
+	then
+		:; # no failed nodes
+	else 
+		# there were failed nodes.
+		printf "failed-nodes (%s): %s\n" "${#failedNodes[*]}" "${failedNodes[*]}"
+	fi
+}
+
+# Done. Exit with last command exit status.
+exit $?
+

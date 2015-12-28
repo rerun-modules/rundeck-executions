@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+
+#/ command: rundeck-executions:query: "query for executions based on job or execution details"
+#/ usage: rerun rundeck-executions:query  --project <> [ --status-filter <>] [ --abortedby-filter <>] [ --user-filter <>] [ --recent-filter <>] [ --begin <>] [ --end <>] [ --adhoc <>]  --url <$RUNDECK_URL> [ --username <$RUNDECK_USER>] [ --password <$RUNDECK_PASSWORD>] [ --apikey <$RUNDECK_APIKEY>] [ --max <20>] [ --offset <0>] [ --job-filter <>] [ --long <true>] [ --file <>] 
+#/ rerun-variables: RERUN, RERUN_VERSION, RERUN_MODULES, RERUN_MODULE_DIR
+#/ option-variables: PROJECT STATUS_FILTER ABORTEDBY_FILTER USER_FILTER RECENT_FILTER BEGIN END ADHOC URL USERNAME PASSWORD APIKEY MAX OFFSET JOB_FILTER LONG FILE
+
+. $RERUN_MODULE_DIR/lib/functions.sh query || { 
+  echo >&2 "Failed loading function library." ; exit 1 ; 
+}
+
+set -o errexit -o nounset -o pipefail
+
+rerun_options_parse "$@"
+
+CURL_OUT=$(mktemp -t curl.out.XXXXXXX)
+trap 'rm $CURL_OUT' EXIT; # cleanup on exit
+
+filters=()
+[[ -n "${JOB_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode jobFilter=$JOB_FILTER)
+[[ -n "${STATUS_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode statusFilter=$STATUS_FILTER)
+[[ -n "${ABORTEDBY_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode abortedbyFilter=$ABORTEDBY_FILTER)
+[[ -n "${USER_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode userFilter=$USER_FILTER)
+[[ -n "${RECENT_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode recentFilter=$RECENT_FILTER)
+[[ -n "${BEGIN:-}" ]] && filters=(${filters[*]:-} --data-urlencode begin=$BEGIN)
+[[ -n "${END:-}" ]] && filters=(${filters[*]:-} --data-urlencode end=$END)
+[[ -n "${ADHOC:-}" ]] && filters=(${filters[*]:-} --data-urlencode adhoc=$ADHOC)
+[[ -n "${MAX:-}" ]] && filters=(${filters[*]:-} --data-urlencode max=$MAX)
+[[ -n "${OFFSET:-}" ]] && filters=(${filters[*]:-} --data-urlencode offset=$OFFSET)
+
+rundeck_authenticate -u "$URL" -U "${USERNAME:-}" -p "${PASSWORD:-}" -k "${APIKEY:-}"
+
+APIURL=${URL}/api/14/project/${PROJECT}/executions
+if ! http_code=$(rundeck_curl -w "%{http_code}" -H Accept:application/xml \
+	${filters[*]} \
+	-X PUT "${APIURL}" -o $CURL_OUT)
+then
+	rerun_die 3 "curl request failed (exit code: $?)"
+fi
+
+
+case ${http_code:-} in
+   	20*) : ;; # successful 
+   	40*) rerun_die "$(xmlstarlet sel -t -m //error -v message $CURL_OUT)" ;;
+	* )  rerun_die 3 "API error ${http_code}: PUT ${APIURL}" ;;
+esac 
+
+# xmlstarlet fo $CURL_OUT >&2; # debug
+
+short_format() {
+	local CURL_OUT=$1
+	xmlstarlet sel -t -m "/executions/execution" \
+		-v @id -n \
+		$CURL_OUT
+	return $?
+}
+adhoc_long_format() {
+	local CURL_OUT=$1
+	xmlstarlet sel -t -m "/executions/execution" \
+		-v @id \
+		-o " " -v @status \
+		-o " by " -v user \
+		-o " - ended: " -v date-ended \
+		-o " duration: " -v "(date-ended/@unixtime - date-started/@unixtime)" -o "s -" \
+		-o " exec: " -v "substring(normalize-space(description),0,20)" \
+		-n \
+		$CURL_OUT
+	return $?
+}
+job_long_format() {
+	local CURL_OUT=$1
+	xmlstarlet sel -t -m "/executions/execution" \
+		-v @id \
+		-o " " -v @status \
+		-o " by " -v user \
+		-o " - ended: " -v date-ended \
+		-o " duration: " -v "((date-ended/@unixtime - date-started/@unixtime) div 1000)" -o "s" \
+		-o " avg: " -v "(job/@averageDuration div 1000)" -o "s"\
+		-o " - " -v "job/@id" \
+		-o " - " -v "concat(job/group,'/',job/name)" \
+		-n \
+		$CURL_OUT
+	return $?
+}
+generic_long_format() {
+	local CURL_OUT=$1
+	xmlstarlet sel -t -m "/executions/execution" \
+		-v @id \
+		-o " " -v @status \
+		-o " by " -v user \
+		-o " - ended: " -v date-ended \
+		-o " duration: " -v "(date-ended/@unixtime - date-started/@unixtime)" -o "s" \
+		-o " " -v "substring(normalize-space(description),0,30)" \
+		-o " - " -v "concat(job/group,' ',job/name)" \
+		-n \
+		$CURL_OUT
+	return $?
+}
+
+
+count=$(xmlstarlet sel -t -m "/executions" -v @count $CURL_OUT)
+total=$(xmlstarlet sel -t -m "/executions" -v @total $CURL_OUT)
+offset=$(xmlstarlet sel -t -m "/executions" -v @offset $CURL_OUT)
+
+rerun_log info "# Query results contain $count of $total matching executions (offset: $offset)"
+
+(( $count < 1 )) && exit 0
+
+if [[ -n "${FILE}" ]]
+then
+	exec > $FILE
+fi
+
+if [[ "${LONG}" == false ]]
+then
+	short_format $CURL_OUT
+	exit $?
+fi
+
+
+
+[[ -n "${JOB_FILTER:-}" ]] && ADHOC=false
+if [[ "${ADHOC:-}" == true ]]
+then
+	adhoc_long_format $CURL_OUT
+elif [[ ${ADHOC:-} == "false" ]]
+then
+	job_long_format $CURL_OUT
+else
+	generic_long_format $CURL_OUT
+fi
+
+# Done. Exit with last command exit status.
+exit $?

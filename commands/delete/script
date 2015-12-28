@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+
+#/ command: rundeck-executions:delete: "Delete a set of executions by their ID"
+#/ usage: rerun rundeck-executions:delete [ --ids <>] [ --file <>]  --url <${RUNDECK_URL:-}> [ --username <${RUNDECK_USER:-}>] [ --password <${RUNDECK_PASSWORD:-}>] [ --apikey <${RUNDECK_APIKEY:-}>] 
+#/ rerun-variables: RERUN, RERUN_VERSION, RERUN_MODULES, RERUN_MODULE_DIR
+#/ option-variables: IDS FILE URL USERNAME PASSWORD APIKEY
+
+. $RERUN_MODULE_DIR/lib/functions.sh delete || { 
+  echo >&2 "Failed loading function library." ; exit 1 ; 
+}
+
+set -o errexit -o nounset -o pipefail
+
+rerun_options_parse "$@"
+
+# Command implementation
+# ----------------------
+CURL_OUT=$(mktemp -t curl.out.XXXXXXXXXX)
+POST_CONTENT=$(mktemp -t post.content.XXXXXXXXXX)
+trap 'rm $CURL_OUT $POST_CONTENT' EXIT; # cleanup on exit
+
+echo "<executions>" > $POST_CONTENT
+if [[ -n "${IDS:-}" ]]
+then
+	idarray=(${IDS})
+	for id in ${idarray[*]}
+	do 
+		echo "  <execution id='${id}'/>" >> $POST_CONTENT
+	done
+fi
+if [[ -f "${FILE}" ]]
+then
+	while read id remainder
+	do
+		echo "  <execution id='${id}'/>" >> $POST_CONTENT
+	done < ${FILE}
+fi
+echo "</executions>" >> $POST_CONTENT
+
+
+rundeck_authenticate -u "$URL" -U "${USERNAME:-}" -p "${PASSWORD:-}" -k "${APIKEY:-}"
+
+APIURL=${URL}/api/12/executions/delete
+
+if ! http_code=$(rundeck_curl -w "%{http_code}" \
+	-H 'Accept:application/xml' -H Content-Type:application/xml \
+	--data-binary @$POST_CONTENT \
+    -X POST "${APIURL}" \
+    -o $CURL_OUT)
+then
+	rerun_die 3 "curl request failed (exit code: $?)"
+fi
+
+case ${http_code:-} in
+	200) : ;; # successful
+	40*) rerun_die 3 "$(xmlstarlet sel -t -m //error -v message $CURL_OUT)" ;;
+	* ) rerun_die 3 "API error $http_code: POST ${APIURL})." ;;
+esac  
+
+# xmlstarlet fo $CURL_OUT; # debug
+
+requestCount=$(xmlstarlet sel -t -m /deleteExecutions -v @requestCount $CURL_OUT)
+allsuccessful=$(xmlstarlet sel -t -m /deleteExecutions -v @allsuccessful $CURL_OUT)
+! successfulCount=$(xmlstarlet sel -t -m /deleteExecutions/successful -v @count $CURL_OUT)
+
+if [[ ${allsuccessful} == true ]]
+then
+	rerun_log info "successfully deleted $requestCount executions"
+else
+	failedCount=$(xmlstarlet sel -t -m /deleteExecutions/failed -v @count $CURL_OUT)
+	rerun_log warn "Deleted ${successfulCount:-0} of ${requestCount} executions. The following $failedCount could not be deleted:"
+	xmlstarlet sel -t -m //failed/execution -v @id -o " - reason: " -v @message -n $CURL_OUT
+fi
+
+
+# Done. Exit with last command exit status.
+exit $?
+
