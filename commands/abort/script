@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+#/ command: rundeck-executions:abort: "Abort a running execution"
+#/ usage: rerun rundeck-executions:abort  --id <>  --url <${RUNDECK_URL:-}> [ --username <${RUNDECK_USER:-}>] [ --password <${RUNDECK_PASSWORD:-}>] [ --apikey <${RUNDECK_APIKEY:-}>] [ --asuser <>] 
+#/ rerun-variables: RERUN, RERUN_VERSION, RERUN_MODULES, RERUN_MODULE_DIR
+#/ option-variables: ID URL USERNAME PASSWORD APIKEY ASUSER
+
+. $RERUN_MODULE_DIR/lib/functions.sh abort || { 
+  echo >&2 "Failed loading function library." ; exit 1 ; 
+}
+
+set -o errexit -o nounset -o pipefail
+
+rerun_options_parse "$@"
+
+CURL_OUT=$(mktemp -t curl.out.XXXXXXXXXX)
+trap 'rm $CURL_OUT' EXIT; # cleanup on exit
+
+rundeck_authenticate -u "$URL" -U "${USERNAME:-}" -p "${PASSWORD:-}" -k "${APIKEY:-}"
+
+qparams=
+[[ -n "$ASUSER" ]] && qparams="asUser=$ASUSER"
+APIURL=${URL}/api/12/execution/$ID/abort
+
+if ! http_code=$(rundeck_curl -w "%{http_code}" -H 'Accept: application/xml' \
+    -X GET "${APIURL}?${qparams:-}" \
+    -o $CURL_OUT)
+then
+	rerun_die 3 "curl request failed (exit code: $?)"
+fi
+
+#xmlstarlet fo $CURL_OUT >&2 ; # debug
+
+case ${http_code:-} in
+	200) : ;; # successful
+	40*) rerun_die 3 "$(xmlstarlet sel -t -m //error -v message $CURL_OUT)" ;;
+	* ) rerun_die 3 "API error $http_code: GET ${APIURL})." ;;
+esac  
+
+
+status=$(xmlstarlet sel -t -m /abort -v @status $CURL_OUT)
+if [[ "$status" == "failed" ]]
+then
+	rerun_log warn "$(xmlstarlet sel -t -m /abort -v @reason $CURL_OUT)"
+else
+	rerun_log info "Abort status: $status"
+fi
+
+exit $?
