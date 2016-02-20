@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 #/ command: rundeck-executions:query: "query for executions based on job or execution details"
-#/ usage: rerun rundeck-executions:query  --project <> [ --status-filter <>] [ --abortedby-filter <>] [ --user-filter <>] [ --recent-filter <>] [ --begin <>] [ --end <>] [ --adhoc <>]  --url <$RUNDECK_URL> [ --username <$RUNDECK_USER>] [ --password <$RUNDECK_PASSWORD>] [ --apikey <$RUNDECK_APIKEY>] [ --max <20>] [ --offset <0>] [ --job-filter <>] [ --long <true>] [ --file <>] 
+#/ usage: rerun rundeck-executions:query  --project <> [ --max <20>] [ --offset <0>] [ --begin <>] [ --end <>] [ --adhoc <>] [ --status-filter <>] [ --job-filter <>] [ --user-filter <>] [ --abortedby-filter <>] [ --recent-filter <>] [ --older-filter <>] [ --long <true>] [ --file <>]  --url <${RUNDECK_URL:-}> [ --username <${RUNDECK_USER:-}>] [ --password <${RUNDECK_PASSWORD:-}>] [ --apikey <${RUNDECK_APIKEY:-}>] [ --assert-minimum-results <>] [ --print-file-content <false>] 
 #/ rerun-variables: RERUN, RERUN_VERSION, RERUN_MODULES, RERUN_MODULE_DIR
-#/ option-variables: PROJECT STATUS_FILTER ABORTEDBY_FILTER USER_FILTER RECENT_FILTER BEGIN END ADHOC URL USERNAME PASSWORD APIKEY MAX OFFSET JOB_FILTER LONG FILE
+#/ option-variables: PROJECT MAX OFFSET BEGIN END ADHOC STATUS_FILTER JOB_FILTER USER_FILTER ABORTEDBY_FILTER RECENT_FILTER OLDER_FILTER LONG FILE URL USERNAME PASSWORD APIKEY ASSERT_MINIMUM_RESULTS PRINT_FILE_CONTENT
 
 . $RERUN_MODULE_DIR/lib/functions.sh query || { 
   echo >&2 "Failed loading function library." ; exit 1 ; 
@@ -22,6 +22,7 @@ filters=()
 [[ -n "${ABORTEDBY_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode abortedbyFilter=$ABORTEDBY_FILTER)
 [[ -n "${USER_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode userFilter=$USER_FILTER)
 [[ -n "${RECENT_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode recentFilter=$RECENT_FILTER)
+[[ -n "${OLDER_FILTER:-}" ]] && filters=(${filters[*]:-} --data-urlencode olderFilter=$OLDER_FILTER)
 [[ -n "${BEGIN:-}" ]] && filters=(${filters[*]:-} --data-urlencode begin=$BEGIN)
 [[ -n "${END:-}" ]] && filters=(${filters[*]:-} --data-urlencode end=$END)
 [[ -n "${ADHOC:-}" ]] && filters=(${filters[*]:-} --data-urlencode adhoc=$ADHOC)
@@ -33,7 +34,8 @@ rundeck_authenticate -u "$URL" -U "${USERNAME:-}" -p "${PASSWORD:-}" -k "${APIKE
 APIURL=${URL}/api/14/project/${PROJECT}/executions
 if ! http_code=$(rundeck_curl -w "%{http_code}" -H Accept:application/xml \
 	${filters[*]} \
-	-X PUT "${APIURL}" -o $CURL_OUT)
+	-X PUT "${APIURL}" \
+	-o $CURL_OUT)
 then
 	rerun_die 3 "curl request failed (exit code: $?)"
 fi
@@ -102,13 +104,26 @@ count=$(xmlstarlet sel -t -m "/executions" -v @count $CURL_OUT)
 total=$(xmlstarlet sel -t -m "/executions" -v @total $CURL_OUT)
 offset=$(xmlstarlet sel -t -m "/executions" -v @offset $CURL_OUT)
 
-rerun_log info "# Query results contain $count of $total matching executions (offset: $offset)"
+if [[ -n "${ASSERT_MINIMUM_RESULTS:-}" ]]
+then
+	(( $count > ${ASSERT_MINIMUM_RESULTS} )) || {
+		rerun_die "Query results contain $count matches which is not greater than required: $ASSERT_MINIMUM_RESULTS"
+	}
+fi	
+
+[[ "${LONG:-}" == true ]] && {
+	rerun_log info "# Query results contain $count of $total matching executions (offset: $offset)"
+}
 
 (( $count < 1 )) && exit 0
 
 if [[ -n "${FILE}" ]]
 then
 	exec > $FILE
+
+	[[ "${PRINT_FILE_CONTENT:-}" == true ]] && {
+		cat $FILE >&2
+	}
 fi
 
 if [[ "${LONG}" == false ]]
@@ -128,6 +143,11 @@ then
 	job_long_format $CURL_OUT
 else
 	generic_long_format $CURL_OUT
+fi
+
+if [[ -n "${FILE}" && "${PRINT_FILE_CONTENT:-}" == true ]]
+then
+	cat $FILE >&2
 fi
 
 # Done. Exit with last command exit status.
