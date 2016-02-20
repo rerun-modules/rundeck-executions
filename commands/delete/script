@@ -19,22 +19,33 @@ CURL_OUT=$(mktemp -t curl.out.XXXXXXXXXX)
 POST_CONTENT=$(mktemp -t post.content.XXXXXXXXXX)
 trap 'rm $CURL_OUT $POST_CONTENT' EXIT; # cleanup on exit
 
-echo "<executions>" > $POST_CONTENT
+
+idarray=()
 if [[ -n "${IDS:-}" ]]
 then
 	idarray=(${IDS})
-	for id in ${idarray[*]}
-	do 
-		echo "  <execution id='${id}'/>" >> $POST_CONTENT
-	done
 fi
 if [[ -f "${FILE}" ]]
 then
 	while read id remainder
 	do
-		echo "  <execution id='${id}'/>" >> $POST_CONTENT
+		idarray=(${idarray[*]} $id)
+
 	done < ${FILE}
 fi
+
+if (( ${#idarray[*]} < 1 ))
+then
+	rerun_log warn "No execution IDs given. Exiting."
+	exit 0
+fi
+
+
+echo "<executions>" > $POST_CONTENT
+for id in ${idarray[*]}
+do 
+	echo "  <execution id='${id}'/>" >> $POST_CONTENT
+done
 echo "</executions>" >> $POST_CONTENT
 
 
